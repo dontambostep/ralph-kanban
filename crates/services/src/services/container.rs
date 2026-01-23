@@ -358,6 +358,16 @@ pub trait ContainerService {
             }
         };
 
+        // Check if PRD has been started (transitioned to autonomous execution phase)
+        // If started=false, we're still in the interactive design phase - user must click Continue manually
+        if !status.started {
+            tracing::info!(
+                "Ralph auto-continue skipped for task {} - PRD not yet started (still in interactive phase)",
+                ctx.task.id
+            );
+            return false;
+        }
+
         // Check if all stories are complete
         if status.current_story.is_none() {
             tracing::info!(

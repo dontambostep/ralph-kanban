@@ -118,22 +118,29 @@ For complete agent instructions, see [`.ralph/prompt.md`](.ralph/prompt.md).
 
 ## MCP Server
 
-Ralph-Kanban includes an MCP (Model Context Protocol) server that allows AI agents to manage tasks programmatically. Available tools:
+Ralph-Kanban extends Vibe Kanban's MCP server with workspace lifecycle tools that allow AI agents to monitor and manage their workspace sessions programmatically.
+
+### Workspace Lifecycle Tools (New in Ralph-Kanban)
 
 | Tool | Description |
 |------|-------------|
-| `list_projects` | List all projects |
-| `list_tasks` | List tasks in a project |
-| `create_task` | Create a new task |
-| `get_task` | Get task details |
-| `update_task` | Update task title, description, or status |
-| `delete_task` | Delete a task |
-| `start_workspace_session` | Start working on a task |
-| `list_repos` | List repositories in a project |
-| `get_repo` | Get repository details including scripts |
-| `update_setup_script` | Update repo setup script |
-| `update_cleanup_script` | Update repo cleanup script |
-| `update_dev_server_script` | Update repo dev server script |
+| `get_workspace_status` | Get execution status (`running`, `completed`, `failed`, `killed`) and diff stats (files changed, lines added/removed) |
+| `get_workspace_transcript` | Get the prompt sent to the agent and its final summary/output |
+| `get_workspace_diff` | Get unified diffs for all changed files with additions/deletions per file |
+| `close_workspace` | Close a workspace with `merge` (merge changes to target branch) or `discard` (discard all changes) strategy |
+| `get_context` | Get project/task/workspace metadata for the active session |
+
+These tools enable autonomous agents to:
+- Check if their execution completed successfully
+- Review what changes were made
+- Programmatically merge or discard their work
+- Access session context without hardcoding IDs
+
+### Inherited Vibe Kanban Tools
+
+Ralph-Kanban also includes all standard Vibe Kanban MCP tools for task management:
+
+`list_projects`, `list_tasks`, `create_task`, `get_task`, `update_task`, `delete_task`, `start_workspace_session`, `list_repos`, `get_repo`, `update_setup_script`, `update_cleanup_script`, `update_dev_server_script`
 
 The MCP server automatically provides workspace context when running inside a task session.
 
