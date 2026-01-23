@@ -45,6 +45,19 @@ pub enum WorkspaceError {
     NoRepositories,
     #[error("Partial workspace creation failed: {0}")]
     PartialCreation(String),
+    #[error("Merge conflicts in repo '{repo_name}': {message}")]
+    MergeConflicts { repo_name: String, message: String },
+    #[error("Git error: {0}")]
+    Git(String),
+}
+
+/// Result of a workspace merge operation for a single repo
+#[derive(Debug, Clone)]
+pub struct RepoMergeResult {
+    pub repo_id: Uuid,
+    pub repo_name: String,
+    pub merge_commit_sha: String,
+    pub target_branch: String,
 }
 
 /// Info about a single repo's worktree within a workspace
@@ -409,5 +422,119 @@ impl WorkspaceManager {
         }
 
         Ok(())
+    }
+
+    /// Close and discard a workspace: cleanup worktrees and delete branches.
+    /// This handles the git-related cleanup. Database updates (archived, container_ref)
+    /// should be handled by the caller.
+    ///
+    /// # Arguments
+    /// * `workspace_dir` - The container_ref path where worktrees are located
+    /// * `repos` - List of repositories in the workspace
+    /// * `branch_name` - The workspace branch to delete from each repo
+    pub async fn close_workspace_discard(
+        workspace_dir: &Path,
+        repos: &[Repo],
+        branch_name: &str,
+    ) -> Result<(), WorkspaceError> {
+        info!(
+            "Closing workspace (discard): {} with branch '{}'",
+            workspace_dir.display(),
+            branch_name
+        );
+
+        // Step 1: Clean up all worktrees and the workspace directory
+        Self::cleanup_workspace(workspace_dir, repos).await?;
+
+        // Step 2: Delete the workspace branch from each repository
+        let git = super::git::GitService::new();
+        for repo in repos {
+            debug!(
+                "Deleting branch '{}' from repo '{}'",
+                branch_name, repo.name
+            );
+            if let Err(e) = git.delete_branch(&repo.path, branch_name) {
+                // Log but don't fail - branch might already be deleted or never created
+                warn!(
+                    "Failed to delete branch '{}' from repo '{}': {}",
+                    branch_name, repo.name, e
+                );
+            }
+        }
+
+        info!("Successfully closed workspace (discard)");
+        Ok(())
+    }
+
+    /// Close workspace with merge: merge workspace branch into target branch for each repo.
+    /// Returns the merge commit SHA for each repo.
+    /// Does NOT cleanup the workspace - caller should call close_workspace_discard after recording merges.
+    ///
+    /// # Arguments
+    /// * `repos_with_targets` - List of (Repo, target_branch) pairs
+    /// * `workspace_branch` - The workspace branch to merge from
+    /// * `commit_message` - The merge commit message
+    pub async fn close_workspace_merge(
+        repos_with_targets: &[(Repo, String)],
+        workspace_branch: &str,
+        commit_message: &str,
+    ) -> Result<Vec<RepoMergeResult>, WorkspaceError> {
+        info!(
+            "Merging workspace branch '{}' into target branches for {} repos",
+            workspace_branch,
+            repos_with_targets.len()
+        );
+
+        let git = super::git::GitService::new();
+        let mut results = Vec::new();
+
+        for (repo, target_branch) in repos_with_targets {
+            debug!(
+                "Merging '{}' into '{}' in repo '{}'",
+                workspace_branch, target_branch, repo.name
+            );
+
+            // Perform the merge in the main repo (not the worktree)
+            let merge_commit_sha = tokio::task::spawn_blocking({
+                let git = git.clone();
+                let repo_path = repo.path.clone();
+                let target_branch = target_branch.clone();
+                let workspace_branch = workspace_branch.to_string();
+                let commit_message = commit_message.to_string();
+                move || {
+                    git.merge_into_branch(
+                        &repo_path,
+                        &target_branch,
+                        &workspace_branch,
+                        &commit_message,
+                    )
+                }
+            })
+            .await
+            .map_err(|e| WorkspaceError::Git(format!("Task join error: {e}")))?
+            .map_err(|e| {
+                if let super::git::GitServiceError::MergeConflicts { message, .. } = e {
+                    WorkspaceError::MergeConflicts {
+                        repo_name: repo.name.clone(),
+                        message,
+                    }
+                } else {
+                    WorkspaceError::Git(format!("Merge failed in repo '{}': {}", repo.name, e))
+                }
+            })?;
+
+            results.push(RepoMergeResult {
+                repo_id: repo.id,
+                repo_name: repo.name.clone(),
+                merge_commit_sha,
+                target_branch: target_branch.clone(),
+            });
+        }
+
+        info!(
+            "Successfully merged workspace branch into {} repos",
+            results.len()
+        );
+        Ok(results)
     }
 }

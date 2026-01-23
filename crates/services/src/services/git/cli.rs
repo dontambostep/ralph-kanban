@@ -608,6 +608,25 @@ impl GitCli {
         Ok(sha)
     }
 
+    /// Checkout base branch and merge from_branch with a merge commit. Returns merge commit sha.
+    /// This performs a regular merge (not squash), creating a merge commit.
+    pub fn merge_commit(
+        &self,
+        repo_path: &Path,
+        base_branch: &str,
+        from_branch: &str,
+        message: &str,
+    ) -> Result<String, GitCliError> {
+        self.git(repo_path, ["checkout", base_branch]).map(|_| ())?;
+        self.git(repo_path, ["merge", "--no-ff", "-m", message, from_branch])
+            .map(|_| ())?;
+        let sha = self
+            .git(repo_path, ["rev-parse", "HEAD"])?
+            .trim()
+            .to_string();
+        Ok(sha)
+    }
+
     /// Update a ref to a specific sha in the repo.
     pub fn update_ref(
         &self,
@@ -653,6 +672,12 @@ impl GitCli {
             }
         }
         Ok(files)
+    }
+
+    /// Delete a local branch (force delete with -D)
+    pub fn delete_branch(&self, repo_path: &Path, branch_name: &str) -> Result<(), GitCliError> {
+        self.git(repo_path, ["branch", "-D", branch_name])
+            .map(|_| ())
     }
 }
 

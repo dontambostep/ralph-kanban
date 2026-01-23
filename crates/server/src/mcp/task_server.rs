@@ -307,6 +307,92 @@ pub struct GetTaskResponse {
     pub task: TaskDetails,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceStatusRequest {
+    #[schemars(description = "The ID of the workspace to check status for")]
+    pub workspace_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceStatusResponse {
+    #[schemars(description = "The workspace ID")]
+    pub workspace_id: String,
+    #[schemars(
+        description = "Status of the latest coding agent execution: 'running', 'completed', 'failed', 'killed', or 'none'"
+    )]
+    pub status: String,
+    #[schemars(description = "Number of files with changes (if workspace has container_ref)")]
+    pub files_changed: Option<usize>,
+    #[schemars(description = "Total lines added across all files")]
+    pub lines_added: Option<usize>,
+    #[schemars(description = "Total lines removed across all files")]
+    pub lines_removed: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceTranscriptRequest {
+    #[schemars(description = "The ID of the workspace to get transcript for")]
+    pub workspace_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceTranscriptResponse {
+    #[schemars(description = "The workspace ID")]
+    pub workspace_id: String,
+    #[schemars(description = "The prompt that was sent to the coding agent")]
+    pub prompt: Option<String>,
+    #[schemars(description = "The agent's summary/final output")]
+    pub summary: Option<String>,
+    #[schemars(description = "The agent session ID (e.g., Claude session ID)")]
+    pub agent_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceDiffRequest {
+    #[schemars(description = "The ID of the workspace to get diff for")]
+    pub workspace_id: Uuid,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FileDiffInfo {
+    #[schemars(description = "File path")]
+    pub path: String,
+    #[schemars(description = "Number of lines added")]
+    pub additions: usize,
+    #[schemars(description = "Number of lines deleted")]
+    pub deletions: usize,
+    #[schemars(description = "The unified diff content")]
+    pub diff_content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GetWorkspaceDiffResponse {
+    #[schemars(description = "The workspace ID")]
+    pub workspace_id: String,
+    #[schemars(description = "List of file diffs")]
+    pub files: Vec<FileDiffInfo>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloseWorkspaceRequest {
+    #[schemars(description = "The ID of the workspace to close")]
+    pub workspace_id: Uuid,
+    #[schemars(description = "The close strategy: 'merge' to merge changes into target branch, or 'discard' to discard changes")]
+    pub strategy: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CloseWorkspaceResponse {
+    #[schemars(description = "The workspace ID")]
+    pub workspace_id: String,
+    #[schemars(description = "Whether the close operation succeeded")]
+    pub success: bool,
+    #[schemars(description = "A message describing the result")]
+    pub message: String,
+    #[schemars(description = "The merge commit SHA (only present when strategy is 'merge')")]
+    pub merge_commit_sha: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskServer {
     client: reqwest::Client,
@@ -998,6 +1084,87 @@ impl TaskServer {
         let response = GetTaskResponse { task: details };
 
         TaskServer::success(&response)
+    }
+
+    #[tool(
+        description = "Get workspace execution status and diff stats. Returns the status of the latest coding agent execution and file change statistics."
+    )]
+    async fn get_workspace_status(
+        &self,
+        Parameters(GetWorkspaceStatusRequest { workspace_id }): Parameters<GetWorkspaceStatusRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let url = self.url(&format!("/api/workspaces/{}/status", workspace_id));
+        let status: GetWorkspaceStatusResponse = match self.send_json(self.client.get(&url)).await {
+            Ok(s) => s,
+            Err(e) => return Ok(e),
+        };
+
+        TaskServer::success(&status)
+    }
+
+    #[tool(
+        description = "Get workspace transcript with agent's prompt and summary. Returns the prompt sent to the coding agent and its final output/summary."
+    )]
+    async fn get_workspace_transcript(
+        &self,
+        Parameters(GetWorkspaceTranscriptRequest { workspace_id }): Parameters<GetWorkspaceTranscriptRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let url = self.url(&format!("/api/workspaces/{}/transcript", workspace_id));
+        let transcript: GetWorkspaceTranscriptResponse =
+            match self.send_json(self.client.get(&url)).await {
+                Ok(t) => t,
+                Err(e) => return Ok(e),
+            };
+
+        TaskServer::success(&transcript)
+    }
+
+    #[tool(
+        description = "Get workspace file diffs. Returns the list of changed files with their unified diff content, additions, and deletions."
+    )]
+    async fn get_workspace_diff(
+        &self,
+        Parameters(GetWorkspaceDiffRequest { workspace_id }): Parameters<GetWorkspaceDiffRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let url = self.url(&format!("/api/workspaces/{}/diff", workspace_id));
+        let diff: GetWorkspaceDiffResponse = match self.send_json(self.client.get(&url)).await {
+            Ok(d) => d,
+            Err(e) => return Ok(e),
+        };
+
+        TaskServer::success(&diff)
+    }
+
+    #[tool(
+        description = "Close a workspace with merge or discard strategy. Use 'merge' to merge changes into the target branch, or 'discard' to discard all changes. Returns success status and merge commit SHA if merge strategy was used."
+    )]
+    async fn close_workspace(
+        &self,
+        Parameters(CloseWorkspaceRequest {
+            workspace_id,
+            strategy,
+        }): Parameters<CloseWorkspaceRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Validate strategy
+        if strategy != "merge" && strategy != "discard" {
+            return Self::err(
+                format!(
+                    "Invalid strategy '{}'. Must be 'merge' or 'discard'",
+                    strategy
+                ),
+                None::<String>,
+            );
+        }
+
+        let url = self.url(&format!("/api/workspaces/{}/close", workspace_id));
+        let body = serde_json::json!({ "strategy": strategy });
+        let result: CloseWorkspaceResponse =
+            match self.send_json(self.client.post(&url).json(&body)).await {
+                Ok(r) => r,
+                Err(e) => return Ok(e),
+            };
+
+        TaskServer::success(&result)
     }
 }
 
