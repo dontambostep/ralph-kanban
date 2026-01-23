@@ -162,22 +162,14 @@ A frontend story is NOT complete until browser verification passes.
 
 After completing a user story, check if ALL stories have `passes: true`.
 
-If ALL stories are complete and passing:
-
-1. **Archive the completed PRD files:**
-   - Create archive folder: `.ralph/archive/{YYYY-MM-DD}-{feature-name}/`
-   - Move `prd.json` and `prd-*.md` files to the archive folder
-   - Move `progress.txt` to the archive folder
-   - Example: `.ralph/archive/2026-01-23-iteration-prompt-improvements/`
-
-2. **Reply with completion signal:**
-   ```
-   <promise>COMPLETE</promise>
-   ```
+If ALL stories are complete and passing, reply with the completion signal:
+```
+<promise>COMPLETE</promise>
+```
 
 If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
 
-**Note:** The `.ralph/archive/` folder is gitignored - archives are for local reference only.
+**Note:** PRD files (`prd.json`, `prd-*.md`, `progress.txt`) are gitignored and stay in place locally.
 
 ---
 
