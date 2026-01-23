@@ -87,7 +87,7 @@ vibe-kanban-cloud/
 .jj
 
 .examples
-.claude
+.claude/settings.local.json
 
 # Ralph - personal task state (prompt.md is shared and committed)
 .ralph/prd.json

@@ -53,22 +53,21 @@ Read any .md reference files in .ralph/ directory for context.
 1. Read the PRD at `prd.json` (in the same directory as this file)
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
 3. Read any .md reference files in the same directory for context
-4. Verify you're on the correct branch from PRD `branchName`
-5. **If `started: false`** → Set `started: true` in prd.json (this marks the transition to autonomous execution)
-6. Identify your target story:
+4. **If `started: false`** → Set `started: true` in prd.json (this marks the transition to autonomous execution)
+5. Identify your target story:
    - If a story has `inProgress: true` → **resume that story** (you're recovering)
    - Otherwise → pick the **first** story where `passes: false`
-7. **Mark story as in-progress** (skip if already `inProgress: true`):
+6. **Mark story as in-progress** (skip if already `inProgress: true`):
    - Update prd.json to set `inProgress: true` on your target story
    - Commit this change: `chore: start [Story ID]`
-8. Implement that single user story
-9. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
-10. Update AGENTS.md files if you discover reusable patterns (see below)
-11. If checks pass:
+7. Implement that single user story
+8. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)
+9. Update AGENTS.md files if you discover reusable patterns (see below)
+10. If checks pass:
     - Commit implementation: `feat: [Story ID] - [Story Title]`
     - Update prd.json: set `passes: true` AND `inProgress: false`
     - Append progress to progress.txt
-12. **Check if this was a checkpoint story:**
+11. **Check if this was a checkpoint story:**
     - If `checkpoint: true` on the completed story → **STOP HERE**
     - Provide a summary of all work completed so far
     - Do NOT continue to the next story (user will review and continue manually)
