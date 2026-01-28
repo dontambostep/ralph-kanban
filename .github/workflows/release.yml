@@ -50,10 +50,6 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: linux-x64
-          # macOS Intel - native build
-          - target: x86_64-apple-darwin
-            os: macos-15-large
-            name: macos-x64
           # macOS ARM - native build
           - target: aarch64-apple-darwin
             os: macos-latest
