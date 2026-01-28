@@ -104,6 +104,8 @@ export function CreateChatBoxContainer() {
   // Get project ID from context
   const projectId = selectedProjectId;
 
+  const repoId = repos.length === 1 ? repos[0]?.id : undefined;
+
   // Determine if we can submit
   const canSubmit =
     repos.length > 0 &&
@@ -277,6 +279,7 @@ export function CreateChatBoxContainer() {
           error={displayError}
           projectId={projectId}
           agent={effectiveProfile?.executor ?? null}
+          repoId={repoId}
           onPasteFiles={uploadFiles}
           localImages={localImages}
           dropzone={{ getRootProps, getInputProps, isDragActive }}

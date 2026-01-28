@@ -1,23 +1,34 @@
-use std::{collections::HashSet, io, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    io,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use eventsource_stream::Eventsource;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use rand::{Rng, distributions::Alphanumeric};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt, BufWriter},
-    sync::{Mutex as AsyncMutex, mpsc, oneshot},
+    sync::{Mutex as AsyncMutex, mpsc},
 };
 use tokio_util::sync::CancellationToken;
 use workspace_utils::approvals::ApprovalStatus;
 
-use super::types::OpencodeExecutorEvent;
+use super::{slash_commands, types::OpencodeExecutorEvent};
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
-    executors::{ExecutorError, opencode::models::maybe_emit_token_usage},
+    env::RepoContext,
+    executors::{
+        ExecutorError,
+        opencode::{OpencodeServer, models::maybe_emit_token_usage},
+    },
 };
 
 #[derive(Clone)]
@@ -40,6 +51,11 @@ impl LogWriter {
 
     pub async fn log_error(&self, message: String) -> Result<(), ExecutorError> {
         self.log_event(&OpencodeExecutorEvent::Error { message })
+            .await
+    }
+
+    pub async fn log_slash_command_result(&self, message: String) -> Result<(), ExecutorError> {
+        self.log_event(&OpencodeExecutorEvent::SlashCommandResult { message })
             .await
     }
 
@@ -70,6 +86,8 @@ pub struct RunConfig {
     /// Cache key for model context windows. Should be derived from configuration
     /// that affects available models (e.g., env vars, base command).
     pub models_cache_key: String,
+    pub commit_reminder: bool,
+    pub repo_context: RepoContext,
 }
 
 /// Generate a cryptographically secure random password for OpenCode server auth.
@@ -92,6 +110,74 @@ struct SessionResponse {
     id: String,
 }
 
+/// Information about a discovered command.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Information about an agent.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AgentInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Configuration response from the server.
+#[derive(Debug, Deserialize)]
+pub struct ConfigResponse {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub plugin: Vec<String>,
+}
+
+/// Provider configuration response.
+#[derive(Debug, Deserialize)]
+pub struct ConfigProvidersResponse {
+    pub providers: Vec<ProviderInfo>,
+    pub default: HashMap<String, String>,
+}
+
+/// Information about a provider.
+#[derive(Debug, Deserialize)]
+pub struct ProviderInfo {
+    pub id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub name: String,
+    #[serde(default)]
+    pub models: HashMap<String, Value>,
+}
+
+/// Provider list response.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct ProviderListResponse {
+    pub all: Vec<ProviderInfo>,
+    pub default: HashMap<String, String>,
+    pub connected: Vec<String>,
+}
+
+/// LSP server status.
+#[derive(Debug, Deserialize, Clone)]
+pub struct LspStatus {
+    pub name: String,
+    pub root: String,
+    pub status: String,
+}
+
+/// Formatter status.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FormatterStatus {
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct PromptRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,11 +190,11 @@ struct PromptRequest {
 }
 
 #[derive(Debug, Serialize, Clone)]
-struct ModelSpec {
+pub struct ModelSpec {
     #[serde(rename = "providerID")]
-    provider_id: String,
+    pub provider_id: String,
     #[serde(rename = "modelID")]
-    model_id: String,
+    pub model_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,7 +204,7 @@ struct TextPartInput {
 }
 
 #[derive(Debug, Clone)]
-enum ControlEvent {
+pub enum ControlEvent {
     Idle,
     AuthRequired { message: String },
     SessionError { message: String },
@@ -128,10 +214,8 @@ enum ControlEvent {
 pub async fn run_session(
     config: RunConfig,
     log_writer: LogWriter,
-    interrupt_rx: oneshot::Receiver<()>,
+    cancel: CancellationToken,
 ) -> Result<(), ExecutorError> {
-    let cancel = CancellationToken::new();
-
     let client = reqwest::Client::builder()
         .default_headers(build_default_headers(
             &config.directory,
@@ -140,28 +224,38 @@ pub async fn run_session(
         .build()
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
 
-    let mut interrupted = false;
-    let interrupt_rx = interrupt_rx.fuse();
-    let session_fut = run_session_inner(config, log_writer, client, cancel.clone()).fuse();
+    run_session_inner(config, log_writer, client, cancel).await
+}
 
-    tokio::pin!(interrupt_rx);
-    tokio::pin!(session_fut);
+pub(super) async fn discover_commands(
+    server: &OpencodeServer,
+    directory: &Path,
+) -> Result<Vec<CommandInfo>, ExecutorError> {
+    let directory = directory.to_string_lossy();
+    let client = reqwest::Client::builder()
+        .default_headers(build_default_headers(&directory, &server.server_password))
+        .build()
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
 
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut interrupt_rx => {
-                interrupted = true;
-                cancel.cancel();
-            }
-            res = &mut session_fut => {
-                if interrupted {
-                    return Ok(());
-                }
-                return res;
-            }
-        }
-    }
+    wait_for_health(&client, &server.base_url).await?;
+    list_commands(&client, &server.base_url, &directory).await
+}
+
+pub async fn run_slash_command(
+    config: RunConfig,
+    log_writer: LogWriter,
+    command: slash_commands::OpencodeSlashCommand,
+    cancel: CancellationToken,
+) -> Result<(), ExecutorError> {
+    let client = reqwest::Client::builder()
+        .default_headers(build_default_headers(
+            &config.directory,
+            &config.server_password,
+        ))
+        .build()
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    slash_commands::execute(config, command, log_writer, client, cancel.clone()).await
 }
 
 async fn run_session_inner(
@@ -213,25 +307,22 @@ async fn run_session_inner(
             auto_approve: config.auto_approve,
             control_tx,
             models_cache_key: config.models_cache_key.clone(),
+            cancel: cancel.clone(),
         },
         event_resp,
     ));
 
-    let prompt_result = run_prompt_with_control(
-        SessionRequestContext {
-            client: &client,
-            base_url: &config.base_url,
-            directory: &config.directory,
-            session_id: &session_id,
-        },
+    let prompt_fut = Box::pin(prompt(
+        &client,
+        &config.base_url,
+        &config.directory,
+        &session_id,
         &config.prompt,
         model.clone(),
         config.model_variant.clone(),
         config.agent.clone(),
-        &mut control_rx,
-        cancel.clone(),
-    )
-    .await;
+    ));
+    let prompt_result = run_request_with_control(prompt_fut, &mut control_rx, cancel.clone()).await;
 
     if cancel.is_cancelled() {
         send_abort(&client, &config.base_url, &config.directory, &session_id).await;
@@ -239,9 +330,55 @@ async fn run_session_inner(
         return Ok(());
     }
 
+    if let Err(err) = prompt_result {
+        event_handle.abort();
+        return Err(err);
+    }
+
+    // Handle commit reminder if enabled
+    if config.commit_reminder && !cancel.is_cancelled() {
+        let uncommitted_changes = config.repo_context.check_uncommitted_changes().await;
+        if !uncommitted_changes.is_empty() {
+            let reminder_prompt = format!(
+                "There are uncommitted changes. Please stage and commit them now with a descriptive commit message.{}",
+                uncommitted_changes
+            );
+
+            tracing::debug!("Sending commit reminder prompt to OpenCode session");
+
+            // Log as system message so it's visible in the UI (user_message gets filtered out)
+            let _ = log_writer
+                .log_event(&OpencodeExecutorEvent::SystemMessage {
+                    content: reminder_prompt.clone(),
+                })
+                .await;
+
+            let reminder_fut = Box::pin(prompt(
+                &client,
+                &config.base_url,
+                &config.directory,
+                &session_id,
+                &reminder_prompt,
+                model,
+                config.model_variant.clone(),
+                config.agent.clone(),
+            ));
+            let reminder_result =
+                run_request_with_control(reminder_fut, &mut control_rx, cancel.clone()).await;
+
+            if let Err(e) = reminder_result {
+                // Log but don't fail the session on commit reminder errors
+                tracing::warn!("Commit reminder prompt failed: {e}");
+            }
+        }
+    }
+
+    if cancel.is_cancelled() {
+        send_abort(&client, &config.base_url, &config.directory, &session_id).await;
+    }
+
     event_handle.abort();
 
-    prompt_result?;
     log_writer.log_event(&OpencodeExecutorEvent::Done).await?;
 
     Ok(())
@@ -259,13 +396,6 @@ fn build_default_headers(directory: &str, password: &str) -> HeaderMap {
     headers
 }
 
-struct SessionRequestContext<'a> {
-    client: &'a reqwest::Client,
-    base_url: &'a str,
-    directory: &'a str,
-    session_id: &'a str,
-}
-
 fn append_session_error(session_error: &mut Option<String>, message: String) {
     match session_error {
         Some(existing) => {
@@ -276,38 +406,26 @@ fn append_session_error(session_error: &mut Option<String>, message: String) {
     }
 }
 
-async fn run_prompt_with_control(
-    ctx: SessionRequestContext<'_>,
-    prompt_text: &str,
-    model: Option<ModelSpec>,
-    model_variant: Option<String>,
-    agent: Option<String>,
+pub async fn run_request_with_control<F>(
+    mut request_fut: F,
     control_rx: &mut mpsc::UnboundedReceiver<ControlEvent>,
     cancel: CancellationToken,
-) -> Result<(), ExecutorError> {
+) -> Result<(), ExecutorError>
+where
+    F: Future<Output = Result<(), ExecutorError>> + Unpin,
+{
     let mut idle_seen = false;
     let mut session_error: Option<String> = None;
 
-    let mut prompt_fut = Box::pin(prompt(
-        ctx.client,
-        ctx.base_url,
-        ctx.directory,
-        ctx.session_id,
-        prompt_text,
-        model,
-        model_variant,
-        agent,
-    ));
-
-    let prompt_result = loop {
+    let request_result = loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            res = &mut prompt_fut => break res,
+            res = &mut request_fut => break res,
             event = control_rx.recv() => match event {
                 Some(ControlEvent::AuthRequired { message }) => return Err(ExecutorError::AuthRequired(message)),
                 Some(ControlEvent::SessionError { message }) => append_session_error(&mut session_error, message),
                 Some(ControlEvent::Disconnected) if !cancel.is_cancelled() => {
-                    return Err(ExecutorError::Io(io::Error::other("OpenCode event stream disconnected while prompt was running")));
+                    return Err(ExecutorError::Io(io::Error::other("OpenCode event stream disconnected while request was running")));
                 }
                 Some(ControlEvent::Disconnected) => return Ok(()),
                 Some(ControlEvent::Idle) => idle_seen = true,
@@ -316,7 +434,7 @@ async fn run_prompt_with_control(
         }
     };
 
-    if let Err(err) = prompt_result {
+    if let Err(err) = request_result {
         if cancel.is_cancelled() {
             return Ok(());
         }
@@ -354,7 +472,10 @@ async fn run_prompt_with_control(
     Ok(())
 }
 
-async fn wait_for_health(client: &reqwest::Client, base_url: &str) -> Result<(), ExecutorError> {
+pub async fn wait_for_health(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<(), ExecutorError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut last_err: Option<String> = None;
 
@@ -389,7 +510,7 @@ async fn wait_for_health(client: &reqwest::Client, base_url: &str) -> Result<(),
     }
 }
 
-async fn create_session(
+pub async fn create_session(
     client: &reqwest::Client,
     base_url: &str,
     directory: &str,
@@ -416,7 +537,7 @@ async fn create_session(
     Ok(session.id)
 }
 
-async fn fork_session(
+pub async fn fork_session(
     client: &reqwest::Client,
     base_url: &str,
     directory: &str,
@@ -518,7 +639,313 @@ async fn prompt(
     ))))
 }
 
-async fn send_abort(client: &reqwest::Client, base_url: &str, directory: &str, session_id: &str) {
+#[derive(Debug, Serialize)]
+struct SessionCommandRequest {
+    command: String,
+    arguments: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn session_command(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    session_id: &str,
+    command: String,
+    arguments: String,
+    agent: Option<String>,
+    model: Option<String>,
+    model_variant: Option<String>,
+) -> Result<(), ExecutorError> {
+    let req = SessionCommandRequest {
+        command,
+        arguments,
+        agent,
+        model,
+        variant: model_variant,
+    };
+
+    let resp = client
+        .post(format!("{base_url}/session/{session_id}/command"))
+        .query(&[("directory", directory)])
+        .json(&req)
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !status.is_success() {
+        return Err(ExecutorError::Io(io::Error::other(format!(
+            "OpenCode session.command failed: HTTP {status} {body}"
+        ))));
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err(ExecutorError::Io(io::Error::other(
+            "OpenCode session.command returned empty response body",
+        )));
+    }
+
+    let parsed: Value =
+        serde_json::from_str(trimmed).map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if parsed.get("info").is_some() && parsed.get("parts").is_some() {
+        return Ok(());
+    }
+
+    if let Some(name) = parsed.get("name").and_then(Value::as_str) {
+        let message = parsed
+            .pointer("/data/message")
+            .and_then(Value::as_str)
+            .unwrap_or(trimmed);
+        return Err(ExecutorError::Io(io::Error::other(format!(
+            "OpenCode session.command failed: {name}: {message}"
+        ))));
+    }
+
+    Err(ExecutorError::Io(io::Error::other(format!(
+        "OpenCode session.command returned unexpected response: {trimmed}"
+    ))))
+}
+
+#[derive(Debug, Serialize)]
+struct SummarizeRequest {
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(rename = "modelID")]
+    model_id: String,
+    auto: bool,
+}
+
+pub async fn session_summarize(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    session_id: &str,
+    model: ModelSpec,
+) -> Result<(), ExecutorError> {
+    let req = SummarizeRequest {
+        provider_id: model.provider_id,
+        model_id: model.model_id,
+        auto: false,
+    };
+
+    let resp = client
+        .post(format!("{base_url}/session/{session_id}/summarize"))
+        .query(&[("directory", directory)])
+        .json(&req)
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "session.summarize").await);
+    }
+
+    let _ = resp
+        .json::<bool>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+    Ok(())
+}
+
+pub async fn list_commands(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<Vec<CommandInfo>, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/command"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "command.list").await);
+    }
+
+    resp.json::<Vec<CommandInfo>>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn list_agents(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<Vec<AgentInfo>, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/agent"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "agent.list").await);
+    }
+
+    resp.json::<Vec<AgentInfo>>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn config_get(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<ConfigResponse, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/config"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "config.get").await);
+    }
+
+    resp.json::<ConfigResponse>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn list_config_providers(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<ConfigProvidersResponse, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/config/providers"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "config.providers").await);
+    }
+
+    resp.json::<ConfigProvidersResponse>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn list_providers(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<ProviderListResponse, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/provider"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "provider.list").await);
+    }
+
+    resp.json::<ProviderListResponse>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn mcp_status(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<HashMap<String, Value>, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/mcp"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "mcp.status").await);
+    }
+
+    resp.json::<HashMap<String, Value>>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn lsp_status(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<Vec<LspStatus>, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/lsp"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "lsp.status").await);
+    }
+
+    resp.json::<Vec<LspStatus>>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+pub async fn formatter_status(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+) -> Result<Vec<FormatterStatus>, ExecutorError> {
+    let resp = client
+        .get(format!("{base_url}/formatter"))
+        .query(&[("directory", directory)])
+        .send()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
+
+    if !resp.status().is_success() {
+        return Err(build_response_error(resp, "formatter.status").await);
+    }
+
+    resp.json::<Vec<FormatterStatus>>()
+        .await
+        .map_err(|err| ExecutorError::Io(io::Error::other(err)))
+}
+
+async fn build_response_error(resp: reqwest::Response, context: &str) -> ExecutorError {
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| "<failed to read response body>".to_string());
+    ExecutorError::Io(io::Error::other(format!(
+        "OpenCode {context} failed: HTTP {status} {body}"
+    )))
+}
+
+pub async fn send_abort(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    session_id: &str,
+) {
     let request = client
         .post(format!("{base_url}/session/{session_id}/abort"))
         .query(&[("directory", directory)]);
@@ -545,7 +972,61 @@ fn parse_model(model: &str) -> Option<ModelSpec> {
     })
 }
 
-async fn connect_event_stream(
+fn parse_model_strict(model: &str) -> Option<ModelSpec> {
+    let (provider_id, model_id) = model.split_once('/')?;
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    Some(ModelSpec {
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+    })
+}
+
+pub async fn resolve_compaction_model(
+    client: &reqwest::Client,
+    base_url: &str,
+    directory: &str,
+    configured_model: Option<&str>,
+) -> Result<ModelSpec, ExecutorError> {
+    if let Some(model) = configured_model.and_then(parse_model_strict) {
+        return Ok(model);
+    }
+
+    let config = config_get(client, base_url, directory).await?;
+    if let Some(model) = config.model.as_deref().and_then(parse_model_strict) {
+        return Ok(model);
+    }
+
+    let providers = list_config_providers(client, base_url, directory).await?;
+    let mut provider_ids: Vec<_> = providers.default.keys().cloned().collect();
+    provider_ids.sort();
+
+    if let Some(provider_id) = provider_ids.first()
+        && let Some(model_id) = providers.default.get(provider_id)
+    {
+        return Ok(ModelSpec {
+            provider_id: provider_id.clone(),
+            model_id: model_id.clone(),
+        });
+    }
+
+    if let Some(provider) = providers.providers.first()
+        && let Some((model_id, _)) = provider.models.iter().next()
+    {
+        return Ok(ModelSpec {
+            provider_id: provider.id.clone(),
+            model_id: model_id.clone(),
+        });
+    }
+
+    Err(ExecutorError::Io(io::Error::other(
+        "OpenCode compaction requires a configured model",
+    )))
+}
+
+pub async fn connect_event_stream(
     client: &reqwest::Client,
     base_url: &str,
     directory: &str,
@@ -579,19 +1060,20 @@ async fn connect_event_stream(
     Ok(resp)
 }
 
-struct EventListenerConfig {
-    client: reqwest::Client,
-    base_url: String,
-    directory: String,
-    session_id: String,
-    log_writer: LogWriter,
-    approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    auto_approve: bool,
-    control_tx: mpsc::UnboundedSender<ControlEvent>,
-    models_cache_key: String,
+pub struct EventListenerConfig {
+    pub client: reqwest::Client,
+    pub base_url: String,
+    pub directory: String,
+    pub session_id: String,
+    pub log_writer: LogWriter,
+    pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    pub auto_approve: bool,
+    pub control_tx: mpsc::UnboundedSender<ControlEvent>,
+    pub models_cache_key: String,
+    pub cancel: CancellationToken,
 }
 
-async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest::Response) {
+pub async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest::Response) {
     let EventListenerConfig {
         client,
         base_url,
@@ -602,6 +1084,7 @@ async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest
         auto_approve,
         control_tx,
         models_cache_key,
+        cancel,
     } = config;
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
@@ -656,13 +1139,20 @@ async fn spawn_event_listener(config: EventListenerConfig, initial_resp: reqwest
                 base_retry_delay: &mut base_retry_delay,
                 last_event_id: &mut last_event_id,
                 models_cache_key: &models_cache_key,
+                cancel: cancel.clone(),
             },
             current_resp,
         )
         .await;
 
         match outcome {
-            Ok(EventStreamOutcome::Idle) | Ok(EventStreamOutcome::Terminal) => return,
+            Ok(EventStreamOutcome::Idle) => {
+                // Keep listening - there may be more prompts (e.g., commit reminder)
+                // The task will be aborted by event_handle.abort() when done
+                resp = None;
+                continue;
+            }
+            Ok(EventStreamOutcome::Terminal) => return,
             Ok(EventStreamOutcome::Disconnected) | Err(_) => {
                 attempt += 1;
                 if attempt >= max_attempts {
@@ -706,6 +1196,7 @@ pub(super) struct EventStreamContext<'a> {
     last_event_id: &'a mut Option<String>,
     /// Cache key for model context windows, derived from config that affects available models.
     pub models_cache_key: &'a str,
+    cancel: CancellationToken,
 }
 
 async fn process_event_stream(
@@ -714,7 +1205,18 @@ async fn process_event_stream(
 ) -> Result<EventStreamOutcome, ExecutorError> {
     let mut stream = resp.bytes_stream().eventsource();
 
-    while let Some(evt) = stream.next().await {
+    loop {
+        let evt = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                return Ok(EventStreamOutcome::Terminal);
+            }
+            evt = stream.next() => {
+                match evt {
+                    Some(evt) => evt,
+                    None => break,
+                }
+            }
+        };
         let evt = evt.map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
 
         if !evt.id.trim().is_empty() {
@@ -816,15 +1318,34 @@ async fn process_event_stream(
                 let directory = ctx.directory.to_string();
                 let log_writer = ctx.log_writer.clone();
                 let auto_approve = ctx.auto_approve;
+                let cancel = ctx.cancel.clone();
                 tokio::spawn(async move {
-                    let status = request_permission_approval(
+                    let status = match request_permission_approval(
                         auto_approve,
                         approvals,
                         &permission,
                         tool_input,
                         &tool_call_id,
+                        cancel,
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(status) => status,
+                        Err(ExecutorApprovalError::Cancelled) => {
+                            tracing::debug!(
+                                "OpenCode approval cancelled for tool_call_id={}",
+                                tool_call_id
+                            );
+                            return;
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "OpenCode approval failed for tool_call_id={}: {err}",
+                                tool_call_id
+                            );
+                            return;
+                        }
+                    };
 
                     let _ = log_writer
                         .log_event(&OpencodeExecutorEvent::ApprovalResponse {
@@ -921,25 +1442,24 @@ async fn request_permission_approval(
     tool_name: &str,
     tool_input: Value,
     tool_call_id: &str,
-) -> ApprovalStatus {
+    cancel: CancellationToken,
+) -> Result<ApprovalStatus, ExecutorApprovalError> {
     if auto_approve {
-        return ApprovalStatus::Approved;
+        return Ok(ApprovalStatus::Approved);
     }
 
     let Some(approvals) = approvals else {
-        return ApprovalStatus::Approved;
+        return Ok(ApprovalStatus::Approved);
     };
 
     match approvals
-        .request_tool_approval(tool_name, tool_input, tool_call_id)
+        .request_tool_approval(tool_name, tool_input, tool_call_id, cancel)
         .await
     {
-        Ok(status) => status,
+        Ok(status) => Ok(status),
         Err(
             ExecutorApprovalError::ServiceUnavailable | ExecutorApprovalError::SessionNotRegistered,
-        ) => ApprovalStatus::Approved,
-        Err(err) => ApprovalStatus::Denied {
-            reason: Some(format!("Approval request failed: {err}")),
-        },
+        ) => Ok(ApprovalStatus::Approved),
+        Err(err) => Err(err),
     }
 }

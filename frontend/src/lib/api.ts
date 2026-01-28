@@ -63,11 +63,8 @@ import {
   CreateInvitationResponse,
   RevokeInvitationRequest,
   UpdateMemberRoleRequest,
-  CreateRemoteProjectRequest,
-  LinkToExistingRequest,
   UpdateMemberRoleResponse,
   Invitation,
-  RemoteProject,
   ListInvitationsResponse,
   OpenEditorResponse,
   OpenEditorRequest,
@@ -94,6 +91,12 @@ import {
   Workspace,
   StartReviewRequest,
   ReviewError,
+  OpenPrInfo,
+  GitRemote,
+  ListPrsError,
+  CreateWorkspaceFromPrBody,
+  CreateWorkspaceFromPrResponse,
+  CreateFromPrError,
 } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
 import { createWorkspaceWithSession } from '@/types/attempt';
@@ -296,38 +299,6 @@ export const projectsApi = {
       options
     );
     return handleApiResponse<SearchResult[]>(response);
-  },
-
-  linkToExisting: async (
-    localProjectId: string,
-    data: LinkToExistingRequest
-  ): Promise<Project> => {
-    const response = await makeRequest(`/api/projects/${localProjectId}/link`, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-    return handleApiResponse<Project>(response);
-  },
-
-  createAndLink: async (
-    localProjectId: string,
-    data: CreateRemoteProjectRequest
-  ): Promise<Project> => {
-    const response = await makeRequest(
-      `/api/projects/${localProjectId}/link/create`,
-      {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }
-    );
-    return handleApiResponse<Project>(response);
-  },
-
-  unlink: async (projectId: string): Promise<Project> => {
-    const response = await makeRequest(`/api/projects/${projectId}/link`, {
-      method: 'DELETE',
-    });
-    return handleApiResponse<Project>(response);
   },
 
   getRepositories: async (projectId: string): Promise<Repo[]> => {
@@ -789,6 +760,20 @@ export const attemptsApi = {
     );
     return handleApiResponse<void>(response);
   },
+
+  /** Create a workspace directly from a pull request */
+  createFromPr: async (
+    data: CreateWorkspaceFromPrBody
+  ): Promise<Result<CreateWorkspaceFromPrResponse, CreateFromPrError>> => {
+    const response = await makeRequest('/api/task-attempts/from-pr', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+    return handleApiResponseAsResult<
+      CreateWorkspaceFromPrResponse,
+      CreateFromPrError
+    >(response);
+  },
 };
 
 // Execution Process APIs
@@ -917,9 +902,25 @@ export const repoApi = {
     return handleApiResponse<SearchResult[]>(response);
   },
 
-  checkRalphReady: async (repoId: string): Promise<RalphCheckResponse> => {
+checkRalphReady: async (repoId: string): Promise<RalphCheckResponse> => {
     const response = await makeRequest(`/api/repos/${repoId}/ralph-check`);
     return handleApiResponse<RalphCheckResponse>(response);
+  },
+
+  listOpenPrs: async (
+    repoId: string,
+    remoteName?: string
+  ): Promise<Result<OpenPrInfo[], ListPrsError>> => {
+    const params = remoteName
+      ? `?remote=${encodeURIComponent(remoteName)}`
+      : '';
+    const response = await makeRequest(`/api/repos/${repoId}/prs${params}`);
+    return handleApiResponseAsResult<OpenPrInfo[], ListPrsError>(response);
+  },
+
+  listRemotes: async (repoId: string): Promise<GitRemote[]> => {
+    const response = await makeRequest(`/api/repos/${repoId}/remotes`);
+    return handleApiResponse<GitRemote[]>(response);
   },
 };
 
@@ -1217,11 +1218,6 @@ export const organizationsApi = {
     return handleApiResponse<ListOrganizationsResponse>(response);
   },
 
-  getProjects: async (orgId: string): Promise<RemoteProject[]> => {
-    const response = await makeRequest(`/api/organizations/${orgId}/projects`);
-    return handleApiResponse<RemoteProject[]>(response);
-  },
-
   createOrganization: async (
     data: CreateOrganizationRequest
   ): Promise<CreateOrganizationResponse> => {
@@ -1346,6 +1342,21 @@ export const scratchApi = {
 
   getStreamUrl: (scratchType: ScratchType, id: string): string =>
     `/api/scratch/${scratchType}/${id}/stream/ws`,
+};
+
+// Agents API
+export const agentsApi = {
+  getSlashCommandsStreamUrl: (
+    agent: BaseCodingAgent,
+    opts?: { workspaceId?: string; repoId?: string }
+  ): string => {
+    const params = new URLSearchParams();
+    params.set('executor', agent);
+    if (opts?.workspaceId) params.set('workspace_id', opts.workspaceId);
+    if (opts?.repoId) params.set('repo_id', opts.repoId);
+
+    return `/api/agents/slash-commands/ws?${params.toString()}`;
+  },
 };
 
 // Queue API for session follow-up messages

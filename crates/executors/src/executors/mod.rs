@@ -3,6 +3,7 @@ use std::{path::Path, sync::Arc};
 use async_trait::async_trait;
 use command_group::AsyncGroupChild;
 use enum_dispatch::enum_dispatch;
+use futures::stream::BoxStream;
 use futures_io::Error as FuturesIoError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ use crate::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
         droid::Droid, gemini::Gemini, opencode::Opencode, qwen::QwenCode,
     },
+    logs::utils::patch,
     mcp_config::McpConfig,
 };
 
@@ -38,6 +40,15 @@ pub mod opencode;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
 pub mod qwen;
+pub mod utils;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct SlashCommandDescription {
+    /// Command name without the leading slash, e.g. `help` for `/help`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -46,6 +57,8 @@ pub enum BaseAgentCapability {
     SessionFork,
     /// Agent requires a setup script before it can run (e.g., login, installation)
     SetupHelper,
+    /// Agent reports context/token usage information
+    ContextUsage,
 }
 
 #[derive(Debug, Error)]
@@ -161,16 +174,22 @@ impl CodingAgent {
 
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
         match self {
-            Self::ClaudeCode(_)
-            | Self::Amp(_)
-            | Self::Gemini(_)
-            | Self::QwenCode(_)
-            | Self::Droid(_)
-            | Self::Opencode(_) => vec![BaseAgentCapability::SessionFork],
+            Self::ClaudeCode(_) => vec![
+                BaseAgentCapability::SessionFork,
+                BaseAgentCapability::ContextUsage,
+            ],
+            Self::Opencode(_) => vec![
+                BaseAgentCapability::SessionFork,
+                BaseAgentCapability::ContextUsage,
+            ],
             Self::Codex(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
+                BaseAgentCapability::ContextUsage,
             ],
+            Self::Amp(_) | Self::Gemini(_) | Self::QwenCode(_) | Self::Droid(_) => {
+                vec![BaseAgentCapability::SessionFork]
+            }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
             #[cfg(feature = "qa-mode")]
@@ -202,12 +221,22 @@ impl AvailabilityInfo {
 pub trait StandardCodingAgentExecutor {
     fn use_approvals(&mut self, _approvals: Arc<dyn ExecutorApprovalService>) {}
 
+    async fn available_slash_commands(
+        &self,
+        _workdir: &Path,
+    ) -> Result<BoxStream<'static, json_patch::Patch>, ExecutorError> {
+        Ok(Box::pin(futures::stream::once(async move {
+            patch::slash_commands(Vec::new(), false, None)
+        })))
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError>;
+
     async fn spawn_follow_up(
         &self,
         current_dir: &Path,
@@ -266,17 +295,17 @@ pub enum ExecutorExitResult {
 /// and mark it according to the result.
 pub type ExecutorExitSignal = tokio::sync::oneshot::Receiver<ExecutorExitResult>;
 
-/// Sender for requesting graceful interrupt of an executor.
-/// When sent, the executor should attempt to interrupt gracefully before being killed.
-pub type InterruptSender = tokio::sync::oneshot::Sender<()>;
+/// Cancellation token for requesting graceful shutdown of an executor.
+/// When cancelled, the executor should attempt to cancel gracefully before being killed.
+pub type CancellationToken = tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct SpawnedChild {
     pub child: AsyncGroupChild,
     /// Executor → Container: signals when executor wants to exit
     pub exit_signal: Option<ExecutorExitSignal>,
-    /// Container → Executor: signals when container wants to interrupt
-    pub interrupt_sender: Option<InterruptSender>,
+    /// Container → Executor: signals when container wants to cancel the execution
+    pub cancel: Option<CancellationToken>,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -284,7 +313,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
         Self {
             child,
             exit_signal: None,
-            interrupt_sender: None,
+            cancel: None,
         }
     }
 }

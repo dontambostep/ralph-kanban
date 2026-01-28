@@ -62,6 +62,7 @@ import { StartReviewDialog } from '@/components/dialogs/tasks/StartReviewDialog'
 import posthog from 'posthog-js';
 import { WorkspacesGuideDialog } from '@/components/ui-new/dialogs/WorkspacesGuideDialog';
 import { SettingsDialog } from '@/components/ui-new/dialogs/SettingsDialog';
+import { CreateWorkspaceFromPrDialog } from '@/components/dialogs/CreateWorkspaceFromPrDialog';
 
 // Mirrored sidebar icon for right sidebar toggle
 const RightSidebarIcon: Icon = forwardRef<SVGSVGElement, IconProps>(
@@ -243,10 +244,12 @@ export const Actions = {
     requiresTarget: true,
     execute: async (ctx, workspaceId) => {
       try {
-        const [firstMessage, repos] = await Promise.all([
+        const [workspace, firstMessage, repos] = await Promise.all([
+          getWorkspace(ctx.queryClient, workspaceId),
           attemptsApi.getFirstUserMessage(workspaceId),
           attemptsApi.getRepos(workspaceId),
         ]);
+        const task = await tasksApi.getById(workspace.task_id);
         ctx.navigate('/workspaces/create', {
           state: {
             initialPrompt: firstMessage,
@@ -254,6 +257,7 @@ export const Actions = {
               repo_id: r.id,
               target_branch: r.target_branch,
             })),
+            project_id: task.project_id,
           },
         });
       } catch {
@@ -390,12 +394,14 @@ export const Actions = {
           getWorkspace(ctx.queryClient, workspaceId),
           attemptsApi.getRepos(workspaceId),
         ]);
+        const task = await tasksApi.getById(workspace.task_id);
         ctx.navigate('/workspaces/create', {
           state: {
             preferredRepos: repos.map((r) => ({
               repo_id: r.id,
               target_branch: workspace.branch,
             })),
+            project_id: task.project_id,
           },
         });
       } catch {
@@ -415,6 +421,16 @@ export const Actions = {
       ctx.navigate('/workspaces/create');
     },
   },
+
+  CreateWorkspaceFromPR: {
+    id: 'create-workspace-from-pr',
+    label: 'Create Workspace from PR',
+    icon: GitPullRequestIcon,
+    requiresTarget: false,
+    execute: async () => {
+      await CreateWorkspaceFromPrDialog.show({});
+    },
+  } satisfies GlobalActionDefinition,
 
   Settings: {
     id: 'settings',
@@ -722,9 +738,9 @@ export const Actions = {
     },
   },
 
-  CopyPath: {
-    id: 'copy-path',
-    label: 'Copy path',
+  CopyWorkspacePath: {
+    id: 'copy-workspace-path',
+    label: 'Copy Workspace Path',
     icon: 'copy-icon' as const,
     shortcut: 'Y P',
     requiresTarget: false,
@@ -880,17 +896,10 @@ export const Actions = {
         });
 
         if (confirmRebase === 'confirmed') {
-          // Trigger the rebase action
-          const repos = await attemptsApi.getRepos(workspaceId);
-          const repo = repos.find((r) => r.id === repoId);
-          if (!repo) throw new Error('Repository not found');
-
-          const branches = await repoApi.getBranches(repoId);
+          // Open rebase dialog - it loads branches/status internally
           await RebaseDialog.show({
             attemptId: workspaceId,
             repoId,
-            branches,
-            initialTargetBranch: repo.target_branch,
           });
         }
         return;
@@ -918,42 +927,11 @@ export const Actions = {
     shortcut: 'X R',
     requiresTarget: 'git',
     isVisible: (ctx) => ctx.hasWorkspace && ctx.hasGitRepos,
-    execute: async (ctx, workspaceId, repoId) => {
-      // Check for existing conflicts first
-      const branchStatus = await attemptsApi.getBranchStatus(workspaceId);
-      const repoStatus = branchStatus?.find((s) => s.repo_id === repoId);
-      const hasConflicts =
-        repoStatus?.is_rebase_in_progress ||
-        (repoStatus?.conflicted_files?.length ?? 0) > 0;
-
-      if (hasConflicts && repoStatus) {
-        // Show resolve conflicts dialog
-        const workspace = await getWorkspace(ctx.queryClient, workspaceId);
-        const result = await ResolveConflictsDialog.show({
-          workspaceId,
-          conflictOp: repoStatus.conflict_op ?? 'rebase',
-          sourceBranch: workspace.branch,
-          targetBranch: repoStatus.target_branch_name,
-          conflictedFiles: repoStatus.conflicted_files ?? [],
-          repoName: repoStatus.repo_name,
-        });
-
-        if (result.action === 'resolved') {
-          invalidateWorkspaceQueries(ctx.queryClient, workspaceId);
-        }
-        return;
-      }
-
-      const repos = await attemptsApi.getRepos(workspaceId);
-      const repo = repos.find((r) => r.id === repoId);
-      if (!repo) throw new Error('Repository not found');
-
-      const branches = await repoApi.getBranches(repoId);
+    execute: async (_ctx, workspaceId, repoId) => {
+      // Open rebase dialog - it loads branches/status internally and handles conflicts
       await RebaseDialog.show({
         attemptId: workspaceId,
         repoId,
-        branches,
-        initialTargetBranch: repo.target_branch,
       });
     },
   },
@@ -965,11 +943,10 @@ export const Actions = {
     requiresTarget: 'git',
     isVisible: (ctx) => ctx.hasWorkspace && ctx.hasGitRepos,
     execute: async (_ctx, workspaceId, repoId) => {
-      const branches = await repoApi.getBranches(repoId);
+      // Open dialog - it loads branches internally
       await ChangeTargetDialog.show({
         attemptId: workspaceId,
         repoId,
-        branches,
       });
     },
   },
@@ -1139,7 +1116,7 @@ export type ContextBarItem = ActionDefinition | typeof ContextBarDivider;
 
 // ContextBar action groups define which actions appear in each section
 export const ContextBarActionGroups = {
-  primary: [Actions.OpenInIDE, Actions.CopyPath] as ActionDefinition[],
+  primary: [Actions.OpenInIDE, Actions.CopyWorkspacePath] as ActionDefinition[],
   secondary: [
     Actions.ToggleDevServer,
     Actions.TogglePreviewMode,
