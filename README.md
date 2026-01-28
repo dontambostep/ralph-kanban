@@ -158,6 +158,14 @@ Then run:
 ralph-kanban
 ```
 
+### Supported Platforms
+
+| Platform | Architecture | Status |
+|----------|--------------|--------|
+| Linux | x64 | ✅ |
+| macOS | ARM64 (Apple Silicon) | ✅ |
+| Windows | x64 | ✅ |
+
 > **Note:** This is a fork of vibe-kanban with Ralph autonomous agent capabilities. If you want the original without Ralph, use `npx vibe-kanban` instead.
 
 ## Development
