@@ -16,7 +16,7 @@ use db::models::{
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
-use services::services::git::DiffTarget;
+use git::DiffTarget;
 use services::services::workspace_manager::WorkspaceManager;
 use ts_rs::TS;
 use utils::diff::create_unified_diff;

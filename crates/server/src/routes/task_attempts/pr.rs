@@ -649,8 +649,11 @@ pub async fn create_workspace_from_pr(
             payload.pr_number, payload.pr_url
         )),
         status: Some(TaskStatus::InProgress),
+        task_type: None,
         parent_workspace_id: None,
         image_ids: None,
+        ralph_auto_continue: None,
+        ralph_max_iterations: None,
     };
     let task = Task::create(pool, &create_task, task_id).await?;
 
@@ -675,6 +678,7 @@ pub async fn create_workspace_from_pr(
         &[CreateWorkspaceRepo {
             repo_id: payload.repo_id,
             target_branch: target_branch_ref.clone(),
+            start_from_ref: None,
         }],
     )
     .await?;

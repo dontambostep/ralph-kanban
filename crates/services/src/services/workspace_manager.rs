@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use db::models::{repo::Repo, workspace::Workspace as DbWorkspace};
+use git::{GitService, GitServiceError};
 use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -447,7 +448,7 @@ impl WorkspaceManager {
         Self::cleanup_workspace(workspace_dir, repos).await?;
 
         // Step 2: Delete the workspace branch from each repository
-        let git = super::git::GitService::new();
+        let git = GitService::new();
         for repo in repos {
             debug!(
                 "Deleting branch '{}' from repo '{}'",
@@ -485,7 +486,7 @@ impl WorkspaceManager {
             repos_with_targets.len()
         );
 
-        let git = super::git::GitService::new();
+        let git = GitService::new();
         let mut results = Vec::new();
 
         for (repo, target_branch) in repos_with_targets {
@@ -513,7 +514,7 @@ impl WorkspaceManager {
             .await
             .map_err(|e| WorkspaceError::Git(format!("Task join error: {e}")))?
             .map_err(|e| {
-                if let super::git::GitServiceError::MergeConflicts { message, .. } = e {
+                if let GitServiceError::MergeConflicts { message, .. } = e {
                     WorkspaceError::MergeConflicts {
                         repo_name: repo.name.clone(),
                         message,
