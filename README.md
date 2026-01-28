@@ -146,11 +146,19 @@ The MCP server automatically provides workspace context when running inside a ta
 
 ## Installation
 
-Make sure you have authenticated with your favourite coding agent. Then in your terminal run:
+**One-line install (macOS/Linux):**
 
 ```bash
-npx vibe-kanban
+curl -sSL https://raw.githubusercontent.com/dontambostep/ralph-kanban/main/install.sh | bash
 ```
+
+Then run:
+
+```bash
+ralph-kanban
+```
+
+> **Note:** This is a fork of vibe-kanban with Ralph autonomous agent capabilities. If you want the original without Ralph, use `npx vibe-kanban` instead.
 
 ## Development
 

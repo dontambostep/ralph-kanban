@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: linux-arm64
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            name: macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: windows-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build frontend
+        run: cd frontend && pnpm run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux ARM64)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        run: cargo build --release --target ${{ matrix.target }} --bin server --bin mcp_task_server --bin review
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} --bin server --bin mcp_task_server --bin review
+
+      - name: Package binaries (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/server ralph-kanban
+          zip -j dist/${{ matrix.name }}-ralph-kanban.zip ralph-kanban
+          cp target/${{ matrix.target }}/release/mcp_task_server ralph-kanban-mcp
+          zip -j dist/${{ matrix.name }}-ralph-kanban-mcp.zip ralph-kanban-mcp
+          cp target/${{ matrix.target }}/release/review ralph-kanban-review
+          zip -j dist/${{ matrix.name }}-ralph-kanban-review.zip ralph-kanban-review
+
+      - name: Package binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/server.exe" "ralph-kanban.exe"
+          Compress-Archive -Path "ralph-kanban.exe" -DestinationPath "dist/${{ matrix.name }}-ralph-kanban.zip"
+          Copy-Item "target/${{ matrix.target }}/release/mcp_task_server.exe" "ralph-kanban-mcp.exe"
+          Compress-Archive -Path "ralph-kanban-mcp.exe" -DestinationPath "dist/${{ matrix.name }}-ralph-kanban-mcp.zip"
+          Copy-Item "target/${{ matrix.target }}/release/review.exe" "ralph-kanban-review.exe"
+          Compress-Archive -Path "ralph-kanban-review.exe" -DestinationPath "dist/${{ matrix.name }}-ralph-kanban-review.zip"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

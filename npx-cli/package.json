@@ -1,19 +1,19 @@
 {
-  "name": "vibe-kanban",
+  "name": "ralph-kanban",
   "private": false,
-  "version": "0.0.163",
+  "version": "0.0.1",
   "main": "index.js",
   "bin": {
-    "vibe-kanban": "bin/cli.js"
+    "ralph-kanban": "bin/cli.js"
   },
-  "keywords": [],
-  "author": "bloop",
+  "keywords": ["kanban", "ai", "coding-agent", "autonomous", "ralph"],
+  "author": "dontambostep",
   "repository": {
     "type": "git",
-    "url": "https://github.com/BloopAI/vibe-kanban"
+    "url": "https://github.com/dontambostep/ralph-kanban"
   },
-  "license": "",
-  "description": "NPX wrapper around vibe-kanban and vibe-kanban-mcp",
+  "license": "MIT",
+  "description": "Autonomous AI agent orchestration - fork of vibe-kanban with Ralph multi-iteration capabilities",
   "dependencies": {
     "adm-zip": "^0.5.16"
   },

@@ -15,7 +15,7 @@ case "$ARCH" in
     ARCH="arm64"
     ;;
   *)
-    echo "⚠️  Warning: Unknown architecture $ARCH, using as-is"
+    echo "Warning: Unknown architecture $ARCH, using as-is"
     ;;
 esac
 
@@ -28,7 +28,7 @@ case "$OS" in
     OS="macos"
     ;;
   *)
-    echo "⚠️  Warning: Unknown OS $OS, using as-is"
+    echo "Warning: Unknown OS $OS, using as-is"
     ;;
 esac
 
@@ -39,44 +39,44 @@ if [ -z "$CARGO_TARGET_DIR" ]; then
   CARGO_TARGET_DIR="target"
 fi
 
-echo "🔍 Detected platform: $PLATFORM"
-echo "🔧 Using target directory: $CARGO_TARGET_DIR"
-echo "🧹 Cleaning previous builds..."
+echo "Detected platform: $PLATFORM"
+echo "Using target directory: $CARGO_TARGET_DIR"
+echo "Cleaning previous builds..."
 rm -rf npx-cli/dist
 mkdir -p npx-cli/dist/$PLATFORM
 
-echo "🔨 Building frontend..."
+echo "Building frontend..."
 (cd frontend && npm run build)
 
-echo "🔨 Building Rust binaries..."
+echo "Building Rust binaries..."
 cargo build --release --manifest-path Cargo.toml
 cargo build --release --bin mcp_task_server --manifest-path Cargo.toml
 
-echo "📦 Creating distribution package..."
+echo "Creating distribution package..."
 
 # Copy the main binary
-cp ${CARGO_TARGET_DIR}/release/server vibe-kanban
-zip -q vibe-kanban.zip vibe-kanban
-rm -f vibe-kanban 
-mv vibe-kanban.zip npx-cli/dist/$PLATFORM/vibe-kanban.zip
+cp ${CARGO_TARGET_DIR}/release/server ralph-kanban
+zip -q ralph-kanban.zip ralph-kanban
+rm -f ralph-kanban
+mv ralph-kanban.zip npx-cli/dist/$PLATFORM/ralph-kanban.zip
 
 # Copy the MCP binary
-cp ${CARGO_TARGET_DIR}/release/mcp_task_server vibe-kanban-mcp
-zip -q vibe-kanban-mcp.zip vibe-kanban-mcp
-rm -f vibe-kanban-mcp
-mv vibe-kanban-mcp.zip npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip
+cp ${CARGO_TARGET_DIR}/release/mcp_task_server ralph-kanban-mcp
+zip -q ralph-kanban-mcp.zip ralph-kanban-mcp
+rm -f ralph-kanban-mcp
+mv ralph-kanban-mcp.zip npx-cli/dist/$PLATFORM/ralph-kanban-mcp.zip
 
 # Copy the Review CLI binary
-cp ${CARGO_TARGET_DIR}/release/review vibe-kanban-review
-zip -q vibe-kanban-review.zip vibe-kanban-review
-rm -f vibe-kanban-review
-mv vibe-kanban-review.zip npx-cli/dist/$PLATFORM/vibe-kanban-review.zip
+cp ${CARGO_TARGET_DIR}/release/review ralph-kanban-review
+zip -q ralph-kanban-review.zip ralph-kanban-review
+rm -f ralph-kanban-review
+mv ralph-kanban-review.zip npx-cli/dist/$PLATFORM/ralph-kanban-review.zip
 
-echo "✅ Build complete!"
-echo "📁 Files created:"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban.zip"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban-mcp.zip"
-echo "   - npx-cli/dist/$PLATFORM/vibe-kanban-review.zip"
+echo "Build complete!"
+echo "Files created:"
+echo "   - npx-cli/dist/$PLATFORM/ralph-kanban.zip"
+echo "   - npx-cli/dist/$PLATFORM/ralph-kanban-mcp.zip"
+echo "   - npx-cli/dist/$PLATFORM/ralph-kanban-review.zip"
 echo ""
-echo "🚀 To test locally, run:"
+echo "To test locally, run:"
 echo "   cd npx-cli && node bin/cli.js"

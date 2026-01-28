@@ -1,9 +1,9 @@
 {
-  "name": "vibe-kanban",
-  "version": "0.0.163",
+  "name": "ralph-kanban",
+  "version": "0.0.1",
   "private": true,
   "bin": {
-    "vibe-kanban": "npx-cli/bin/cli.js"
+    "ralph-kanban": "npx-cli/bin/cli.js"
   },
   "files": [
     "npx-cli/bin/cli.js",
