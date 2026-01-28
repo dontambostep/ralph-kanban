@@ -166,6 +166,28 @@ ralph-kanban
 | macOS | ARM64 (Apple Silicon) | ✅ |
 | Windows | x64 | ✅ |
 
+### MCP Server Installation
+
+To also install the MCP server (for AI agent integration):
+
+```bash
+INSTALL_MCP=1 bash -c "$(curl -sSL https://raw.githubusercontent.com/dontambostep/ralph-kanban/main/install.sh)"
+```
+
+Then add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ralph-kanban": {
+      "command": "/Users/YOUR_USERNAME/.ralph-kanban/bin/ralph-kanban-mcp"
+    }
+  }
+}
+```
+
+Replace `YOUR_USERNAME` with your actual username, or use the full path shown after installation.
+
 > **Note:** This is a fork of vibe-kanban with Ralph autonomous agent capabilities. If you want the original without Ralph, use `npx vibe-kanban` instead.
 
 ## Development
